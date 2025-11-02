@@ -45,6 +45,7 @@ class BankAssistantRAG:
         try:
             # Чтение CSV с обработкой кавычек
             df = pd.read_csv(data_path, quotechar='"', delimiter=",")
+            df = df.iloc[:10,:]
         except Exception as e:
             print(f"Ошибка чтения CSV: {e}. Использую альтернативный метод...")
             # df = self._alternative_csv_reading(data_path)
@@ -99,10 +100,27 @@ class BankAssistantRAG:
         print("Построение векторной базы знаний...")
 
         embeddings = self.get_embeddings(documents)
+
+        # Убеждаемся, что данные в правильном формате
+        print(f"Тип embeddings: {embeddings.dtype}")
+        print(f"Форма embeddings: {embeddings.shape}")
+
         dimension = embeddings.shape[1]
+
+        # Создаем индекс для косинусного сходства
         self.index = faiss.IndexFlatIP(dimension)
-        faiss.normalize_L2(embeddings)
-        self.index.add(embeddings.astype("float32"))
+
+        # Нормализуем векторы для косинусного сходства
+        # Используем более безопасный способ нормализации
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0  # Избегаем деления на ноль
+        embeddings_normalized = embeddings / norms
+
+        # Проверяем, что нормализация прошла правильно
+        print(f"Проверка нормализации: {np.linalg.norm(embeddings_normalized[0])}")
+
+        # Добавляем в индекс
+        self.index.add(embeddings_normalized)
 
         print(f"Векторная база знаний построена: {self.index.ntotal} векторов")
 
@@ -112,8 +130,12 @@ class BankAssistantRAG:
             raise ValueError("Векторная база знаний не построена")
 
         query_embedding = self.get_embeddings([query])[0]
-        query_embedding = query_embedding.reshape(1, -1).astype("float32")
-        faiss.normalize_L2(query_embedding)
+        query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
+
+        # Нормализуем query так же, как и документы
+        query_norm = np.linalg.norm(query_embedding)
+        if query_norm > 0:
+            query_embedding = query_embedding / query_norm
 
         distances, indices = self.index.search(query_embedding, k)
 
