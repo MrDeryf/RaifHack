@@ -160,8 +160,8 @@ class BankAssistantRAG:
             def __init__(self, rag_system):
                 self.rag_system = rag_system
 
-            def invoke(self, query):
-                results = self.rag_system.search_similar_documents(query, k=3)
+            def invoke(self, query, k=3):
+                results = self.rag_system.search_similar_documents(query, k=k)
                 # Конвертируем в формат LangChain Document
                 docs = []
                 for result in results:
@@ -249,8 +249,14 @@ if __name__ == "__main__":
     # # Создание инструмента поиска (для возможного использования в агентах)
     # retrieval_tool = assistant.create_retrieval_tool()
     query = "Как просрочка по «беспроцентному» займу скажется на переплате/ПСК?"
-    results = assistant.search_similar_documents(query=query, k=5)
-    for i, result in enumerate(results):
-        print(f"Результат {i + 1}:")
-        print(f"  Сходство: {result['similarity']:.3f}")
-        print(f"  Содержимое: {result['content'][:200]}...")
+    # results = assistant.search_similar_documents(query=query, k=5)
+    # # for i, result in enumerate(results):
+    # #     print(f"Результат {i + 1}:")
+    # #     print(f"  Сходство: {result['similarity']:.3f}")
+    # #     print(f"  Содержимое: {result['content'][:200]}...")
+
+    retriever = assistant.create_retriever_tool()
+    retriever_results = retriever.invoke(query, k=5)
+    print(f"Найдено документов: {len(retriever_results)}")
+    for result in retriever_results:
+        print(f" Сходство: {result['similarity']:.3f}")
