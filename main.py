@@ -45,10 +45,10 @@ class BankAssistantRAG:
         try:
             # Чтение CSV с обработкой кавычек
             df = pd.read_csv(data_path, quotechar='"', delimiter=",")
-            df = df.iloc[:10,:]
+            df = df.iloc[:10, :]
         except Exception as e:
-            print(f"Ошибка чтения CSV: {e}. Использую альтернативный метод...")
-            # df = self._alternative_csv_reading(data_path)
+            print(f"Ошибка чтения CSV: {e}")
+            return []
 
         # Создание документов LangChain
         processed_docs = []
@@ -66,9 +66,9 @@ class BankAssistantRAG:
         # Разбиение на чанки
         doc_splits = self.text_splitter.split_documents(processed_docs)
         self.documents = [doc.page_content for doc in doc_splits]
-        self.documents_with_metadata = doc_splits  # Сохраняем документы с метаданными
+        self.documents_with_metadata = doc_splits
 
-        # print(f"Обработано {len(self.documents)} текстовых фрагментов")
+        print(f"Обработано {len(self.documents)} текстовых фрагментов")
         return self.documents
 
     def initialize_embedder(self):
@@ -101,26 +101,16 @@ class BankAssistantRAG:
 
         embeddings = self.get_embeddings(documents)
 
-        # Убеждаемся, что данные в правильном формате
-        print(f"Тип embeddings: {embeddings.dtype}")
-        print(f"Форма embeddings: {embeddings.shape}")
-
         dimension = embeddings.shape[1]
-
-        # Создаем индекс для косинусного сходства
         self.index = faiss.IndexFlatIP(dimension)
 
         # Нормализуем векторы для косинусного сходства
-        # Используем более безопасный способ нормализации
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0  # Избегаем деления на ноль
+        norms[norms == 0] = 1.0
         embeddings_normalized = embeddings / norms
 
-        # Проверяем, что нормализация прошла правильно
-        print(f"Проверка нормализации: {np.linalg.norm(embeddings_normalized[0])}")
-
         # Добавляем в индекс
-        self.index.add(embeddings_normalized)
+        self.index.add(embeddings_normalized.astype("float32"))
 
         print(f"Векторная база знаний построена: {self.index.ntotal} векторов")
 
@@ -132,7 +122,7 @@ class BankAssistantRAG:
         query_embedding = self.get_embeddings([query])[0]
         query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
 
-        # Нормализуем query так же, как и документы
+        # Нормализуем query
         query_norm = np.linalg.norm(query_embedding)
         if query_norm > 0:
             query_embedding = query_embedding / query_norm
@@ -155,12 +145,12 @@ class BankAssistantRAG:
     def create_retriever_tool(self):
         """Создание инструмента для поиска в стиле LangChain"""
 
-        # Создаем кастомный retriever
         class CustomRetriever:
             def __init__(self, rag_system):
                 self.rag_system = rag_system
 
-            def invoke(self, query, k=3):
+            def invoke(self, query, **kwargs):
+                k = kwargs.get("k", 3)
                 results = self.rag_system.search_similar_documents(query, k=k)
                 # Конвертируем в формат LangChain Document
                 docs = []
@@ -176,16 +166,11 @@ class BankAssistantRAG:
                     )
                 return docs
 
+            def get_relevant_documents(self, query):
+                return self.invoke(query)
+
         custom_retriever = CustomRetriever(self)
-
-        # Создаем инструмент
-        retriever_tool = create_retriever_tool(
-            custom_retriever,
-            "bank_knowledge_search",
-            "Поиск информации о банковских продуктах, кредитах, вкладах, ипотеке и финансовых услугах.",
-        )
-
-        return retriever_tool
+        return custom_retriever
 
 
 # # Функция для генерации ответа по заданному вопросу, вы можете изменять ее в процессе работы, однако
@@ -248,7 +233,7 @@ if __name__ == "__main__":
 
     # # Создание инструмента поиска (для возможного использования в агентах)
     # retrieval_tool = assistant.create_retrieval_tool()
-    query = "Как просрочка по «беспроцентному» займу скажется на переплате/ПСК?"
+    query = "Чем отличаются госгарантии по деньгам на эскроу от гарантий по накоплениям в НПФ?"
     # results = assistant.search_similar_documents(query=query, k=5)
     # # for i, result in enumerate(results):
     # #     print(f"Результат {i + 1}:")
@@ -256,7 +241,8 @@ if __name__ == "__main__":
     # #     print(f"  Содержимое: {result['content'][:200]}...")
 
     retriever = assistant.create_retriever_tool()
-    retriever_results = retriever.invoke(query, k=5)
+    retriever_results = retriever.invoke(query, k=2)
     print(f"Найдено документов: {len(retriever_results)}")
-    for result in retriever_results:
-        print(f" Сходство: {result['similarity']:.3f}")
+    for doc in retriever_results:
+        print(f"Сходство: {doc.metadata['similarity']:.3f}")
+        print(f"Содержимое: {doc.page_content[:200]}...")
