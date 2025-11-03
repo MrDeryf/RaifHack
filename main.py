@@ -1,11 +1,9 @@
 import pandas as pd
 import numpy as np
+import os
 from openai import OpenAI
 from tqdm import tqdm
 from dotenv import load_dotenv
-import os
-import faiss
-import re
 from langchain_core.documents import Document
 from langchain_core.tools import create_retriever_tool
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -21,17 +19,73 @@ LLM_API_KEY = os.getenv("LLM_API_KEY")
 # Подключаем ключ для EMBEDDER-модели
 EMBEDDER_API_KEY = os.getenv("EMBEDDER_API_KEY")
 
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=800,
+    chunk_overlap=150,
+    length_function=len,
+)
+
+data_path = "./train_data.csv"
+
+
+print("Загрузка тренировочных данных...")
+
+try:
+    # Чтение CSV с обработкой кавычек
+    df = pd.read_csv(data_path, quotechar='"', delimiter=",")
+    # df = df.iloc[:10, :]
+except Exception as e:
+    print(f"Ошибка чтения CSV: {e}")
+
+# Создание документов LangChain
+processed_docs = []
+for _, row in df.iterrows():
+    # Объединяем аннотацию и текст для лучшего контекста
+    content = f"Тема: {row.get('annotation', '')}\n\n {row.get('text', '')}"
+    metadata = {
+        "id": row.get("id", ""),
+        "tags": row.get("tags", ""),
+        "source": "bank_knowledge_base",
+    }
+    doc = Document(page_content=content, metadata=metadata)
+    processed_docs.append(doc)
+
+# Разбиение на чанки
+doc_splits = text_splitter.split_documents(processed_docs)
+documents = [doc.page_content for doc in doc_splits]
+documents_with_metadata = doc_splits
+
+
 embedder = OpenAIEmbeddings(
-    model="text-embedding-3-small",
+    model="text-embedding-ada-002",
     base_url="https://ai-for-finance-hack.up.railway.app/",
     api_key=EMBEDDER_API_KEY,
 )
 
-vectorstore = FAISS.load_local(
-    "faiss_store", embedder, allow_dangerous_deserialization=True
+# Создаем эмбеддинги с прогресс-баром
+print("Генерация эмбеддингов...")
+texts = [doc.page_content for doc in documents_with_metadata]
+metadatas = [doc.metadata for doc in documents_with_metadata]
+
+# Генерируем эмбеддинги батчами для лучшего прогресса
+batch_size = 10
+embeddings = []
+
+for i in tqdm(range(0, len(texts), batch_size), desc="Создание эмбеддингов"):
+    batch_texts = texts[i : i + batch_size]
+    batch_embeddings = embedder.embed_documents(batch_texts)
+    embeddings.extend(batch_embeddings)
+
+vectorstore = FAISS.from_embeddings(
+    text_embeddings=list(zip(texts, embeddings)),
+    embedding=embedder,
+    metadatas=metadatas,
 )
 
-retriever = vectorstore.as_retriever()
+retriever = vectorstore.as_retriever(
+    search_type="similarity_score_threshold", search_kwargs={"score_threshold": 1e-7}
+)
 
 retriever_tool = create_retriever_tool(
     retriever,
@@ -82,45 +136,47 @@ def generate_answer(state: MessagesState):
     return {"messages": [response]}
 
 
+workflow = StateGraph(MessagesState)
+# Define the nodes we will cycle between
+workflow.add_node(generate_query_or_respond)
+workflow.add_node("retrieve", ToolNode([retriever_tool]))
+workflow.add_node(generate_answer)
+workflow.add_edge(START, "generate_query_or_respond")
+workflow.add_conditional_edges(
+    "generate_query_or_respond",
+    # Assess LLM decision (call `retriever_tool` tool or respond to the user)
+    tools_condition,
+    {
+        # Translate the condition outputs to nodes in our graph
+        "tools": "retrieve",
+        END: END,
+    },
+)
+workflow.add_edge("retrieve", "generate_answer")
+workflow.add_edge("generate_answer", END)
+graph = workflow.compile()
+
+
+def answer_generation(question):
+    return graph.invoke({"messages": [{"role": "user", "content": question}]})[
+        "messages"
+    ][-1].content
+
+
 if __name__ == "__main__":
-    workflow = StateGraph(MessagesState)
-
-    # Define the nodes we will cycle between
-    workflow.add_node(generate_query_or_respond)
-    workflow.add_node("retrieve", ToolNode([retriever_tool]))
-    workflow.add_node(generate_answer)
-
-    workflow.add_edge(START, "generate_query_or_respond")
-    workflow.add_conditional_edges(
-        "generate_query_or_respond",
-        # Assess LLM decision (call `retriever_tool` tool or respond to the user)
-        tools_condition,
-        {
-            # Translate the condition outputs to nodes in our graph
-            "tools": "retrieve",
-            END: END,
-        },
-    )
-    workflow.add_edge("retrieve", "generate_answer")
-    workflow.add_edge("generate_answer", END)
-
-    graph = workflow.compile()
-
-    # from IPython.display import Image, display
-
-    # display(Image(graph.get_graph().draw_mermaid_png()))
-
-    for chunk in graph.stream(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "Как просрочка по «беспроцентному» займу скажется на переплате/ПСК?",
-                }
-            ]
-        }
-    ):
-        for node, update in chunk.items():
-            print("Update from node", node)
-            update["messages"][-1].pretty_print()
-            print("\n\n")
+    # Считываем список вопросов
+    questions = pd.read_csv("./questions.csv")
+    # Выделяем список вопросов
+    questions_list = questions["Вопрос"].tolist()
+    # Создаем список для хранения ответов
+    answer_list = []
+    # Проходимся по списку вопросов
+    for current_question in tqdm(questions_list, desc="Генерация ответов"):
+        # Отправляем запрос на генерацию ответа
+        answer = answer_generation(question=current_question)
+        # Добавляем ответ в список
+        answer_list.append(answer)
+    # Добавляем в данные список ответов
+    questions["Ответы на вопрос"] = answer_list
+    # Сохраняем submission
+    questions.to_csv("submission.csv", index=False)
